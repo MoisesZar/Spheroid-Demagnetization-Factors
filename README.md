@@ -38,6 +38,20 @@ The simulation computes `N_z` from the average demagnetizing field along `z`:
 
     N_z = -⟨H_demag,z⟩ / M_s
 
+### Why the `6/π` factor appears in the code
+
+The demagnetizing field is averaged over the whole simulation mesh, which
+contains both magnetic cells (inside the spheroid) and empty cells (outside).
+For an ellipsoid of semi-axes `a, b, c`:
+
+    V_spheroid = (4/3) π a b c
+    V_box      = (2a)(2b)(2c) = 8 a b c
+    V_spheroid / V_box = π/6
+
+Setting the magnetization inside the spheroid to `Ms · 6/π` makes the
+average over the whole mesh equal to the average over the magnetic volume,
+so that `N_z = -⟨H_demag,z⟩ / Ms` is recovered directly.
+
 ---
 
 ## Model
