@@ -68,7 +68,8 @@ The simulation runs at `temp = 0` (no thermal noise) with Gilbert damping
 `alpha = 0.5`.
 
 ---
-
+MoisesZar
+moisesg.zarzoza@uclm.es
 ## Requirements
 
 - Python 3.9+
