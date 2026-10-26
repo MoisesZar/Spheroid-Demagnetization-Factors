@@ -1,8 +1,6 @@
 
 ---
 
-## 4. Código limpio (con la ecuación documentada)
-
 ```python
 #!/usr/bin/env python
 # coding: utf-8
