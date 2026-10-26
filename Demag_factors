@@ -1,0 +1,240 @@
+
+---
+
+## 4. Código limpio (con la ecuación documentada)
+
+```python
+#!/usr/bin/env python
+# coding: utf-8
+"""
+Demagnetization factors of spheroidal magnetic nanoparticles.
+
+Computes the demagnetization factor N_z of a prolate spheroid as a function
+of its aspect ratio m = c / a, from the simulated demagnetizing field.
+
+Physics
+-------
+For a uniformly magnetized body:
+
+    H_demag = -N · M
+
+    E_demag = (1/2) μ0 V N · M²
+
+For a prolate spheroid (m > 1) uniformly magnetized along its symmetry axis:
+
+    N_z(m) = 1/(m² - 1) · [ (m/√(m² - 1)) ·
+             ln((m + √(m² - 1)) / (m - √(m² - 1))) - 1 ]
+
+    N_z(1) = 1/3                      (sphere)
+
+The simulation returns:
+
+    N_z = -⟨H_demag,z⟩ / M_s
+
+Built on Ubermag / OOMMF.
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+import oommfc as mc
+import discretisedfield as df
+import micromagneticmodel as mm
+
+
+# ----------------------------------------------------------------------
+# Physical and numerical parameters
+# ----------------------------------------------------------------------
+n0 = 0.8388e-9                  # reference length (m)
+rho = 5170                      # density (kg/m^3)
+MW = 234.37                     # molar mass (g/mol)
+Na = 6.022e23                   # Avogadro constant
+n = Na * rho * 1000 / MW        # number density (1/m^3)
+Ms = 2 * mm.consts.muB * n      # saturation magnetization (A/m)
+
+alpha = 0.5                     # Gilbert damping
+dt = 1e-12                      # timestep (s)
+temp = 0                        # temperature (K); no thermal noise
+H0 = 4e5                        # saturating field along z (A/m)
+
+# Aspect ratios to sweep
+aspect_ratios = np.concatenate((
+    np.arange(1.0, 2.1, 0.1),
+    np.arange(3.0, 11.0, 1.0),
+))
+
+# Reproducibility (optional)
+np.random.seed(42)
+
+
+# ----------------------------------------------------------------------
+# Snapshot of the magnetization on two orthogonal planes
+# ----------------------------------------------------------------------
+def snapshot(system, title):
+    """Plot Mz on the xy plane and Mx on the yz plane."""
+    plane_xy = system.m.sel('z').resample((16, 16))
+    plane_yz = system.m.sel('x').resample((16, 16))
+
+    fig, axs = plt.subplots(figsize=(12, 6), nrows=1, ncols=2)
+
+    plane_xy.mpl.vector(ax=axs[0], use_color=False, color="white")
+    plane_xy.z.mpl(
+        ax=axs[0],
+        scalar_kw={
+            "colorbar_label": "Mz (A/m)",
+            "cmap": "cividis",
+            "symmetric_clim": True,
+        },
+        vector_kw={"color": "white"},
+    )
+    plane_yz.mpl(
+        ax=axs[1],
+        scalar_kw={
+            "colorbar_label": "Mx (A/m)",
+            "cmap": "cividis",
+            "symmetric_clim": True,
+        },
+        vector_kw={"color": "white"},
+    )
+    axs[0].set_title("xy plane")
+    axs[1].set_title("yz plane")
+    fig.suptitle(title, fontsize="xx-large")
+    fig.tight_layout()
+
+
+# ----------------------------------------------------------------------
+# Simulation of one spheroid
+# ----------------------------------------------------------------------
+def demag_factor(m, particle_cells=8, save_snapshots=False):
+    """
+    Simulate the demagnetizing field of a spheroid of aspect ratio m.
+
+    Parameters
+    ----------
+    m : float
+        Aspect ratio c / a (c along z, a in the xy plane). m >= 1.
+    particle_cells : int
+        Particle diameter in units of n0 (transverse semi-axis = m * this).
+    save_snapshots : bool
+        If True, save a snapshot of the magnetization for m = 1, 2, 10.
+
+    Returns
+    -------
+    Nz : float
+        Demagnetization factor along z.
+    """
+    dNP = particle_cells * n0
+    cell = (dNP, dNP, dNP)
+
+    # Box size in the transverse plane and along the symmetry axis.
+    # The z-extent grows with m to accommodate the elongated spheroid.
+    d_xy = 40 * dNP
+    z_extra = 20 * (m - 1) * dNP
+
+    region = df.Region(
+        p1=(-d_xy / 2, -d_xy / 2, -d_xy / 2 - z_extra),
+        p2=(d_xy / 2, d_xy / 2, d_xy / 2 + z_extra),
+    )
+    mesh = df.Mesh(region=region, cell=cell)
+
+    # Spheroidal shape.
+    # NOTE: the factor 6/pi is a numerical normalization chosen so that
+    # the mean demagnetizing field divided by Ms gives N_z directly.
+    def Ms_shape(pos):
+        x, y, z = pos
+        if (2 * x / d_xy) ** 2 + (2 * y / d_xy) ** 2 + (2 * z / (d_xy * m)) ** 2 > 1:
+            return 0
+        return Ms * 6 / np.pi
+
+    system = mm.System(name=f'Demag_spheroid_m{m:.2f}')
+    system.m = df.Field(
+        mesh,
+        nvdim=3,
+        value=lambda pos: np.random.uniform(-1, 1, size=3),
+        norm=Ms_shape,
+        valid="norm",
+    )
+
+    # Energies: Zeeman (saturation) + demag only.
+    # Exchange and anisotropy are intentionally absent.
+    system.energy = mm.Zeeman(H=(0, 0, H0)) + mm.Demag()
+    system.dynamics = (
+        mm.Precession(gamma0=mm.consts.gamma0)
+        + mm.Damping(alpha=alpha)
+    )
+
+    # Effective damping in the thermal evolver is alpha / (1 + alpha^2)
+    evolver = mc.UHH_ThetaEvolver(
+        fixed_timestep=dt, alpha=alpha / (1 + alpha ** 2)
+    )
+    td = mc.TimeDriver(evolver=evolver)
+    td.drive(system, t=1e-9, n=100)
+
+    # Demagnetizing field and its z-average
+    stray_field = mc.compute(system.energy.demag.effective_field, system)
+    Nd = stray_field.mean()[2] / Ms
+
+    if save_snapshots and m in (1, 2, 10):
+        snapshot(system, f"m = {m:g}")
+
+    return -Nd
+
+
+# ----------------------------------------------------------------------
+# Analytical demagnetization factor of a prolate spheroid
+# ----------------------------------------------------------------------
+def N_z_analytical(m):
+    """
+    Analytical demagnetization factor of a prolate spheroid along z.
+
+        N_z(m) = 1/(m² - 1) · [ (m/√(m² - 1)) ·
+                 ln((m + √(m² - 1)) / (m - √(m² - 1))) - 1 ]
+
+        N_z(1) = 1/3                       (sphere)
+    """
+    if m == 1:
+        return 1 / 3
+    return 1 / (m ** 2 - 1) * (
+        m / np.sqrt(m ** 2 - 1)
+        * np.log((m + np.sqrt(m ** 2 - 1)) / (m - np.sqrt(m ** 2 - 1)))
+        - 1
+    )
+
+
+# ----------------------------------------------------------------------
+# Main
+# ----------------------------------------------------------------------
+if __name__ == "__main__":
+    Nz_sim = []
+
+    for m in aspect_ratios:
+        Nz = demag_factor(m, save_snapshots=True)
+        Nz_sim.append(Nz)
+        print(f"m = {m:5.2f} | N_z (sim) = {Nz:.5f} | "
+              f"N_z (analytical) = {N_z_analytical(m):.5f}")
+
+    Nz_sim = np.array(Nz_sim)
+    Nz_th = np.array([N_z_analytical(m) for m in aspect_ratios])
+
+    # Save results
+    data = np.column_stack((aspect_ratios, Nz_sim, Nz_th))
+    np.savetxt(
+        "demag_factors_spheroid_alpha05_T0.txt",
+        data,
+        fmt="%.5f",
+        header="m N_z_sim N_z_analytical",
+        delimiter=" ",
+    )
+    print("Saved demag_factors_spheroid_alpha05_T0.txt")
+
+    # Plot simulation vs analytical
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(aspect_ratios, Nz_sim, "o", label="Simulation")
+    ax.plot(aspect_ratios, Nz_th, "-", label="Analytical")
+    ax.set_xlabel("Aspect ratio m = c/a")
+    ax.set_ylabel(r"$N_z$")
+    ax.set_title("Demagnetization factor of a prolate spheroid")
+    ax.legend()
+    ax.grid(True)
+    plt.tight_layout()
+    plt.show()
